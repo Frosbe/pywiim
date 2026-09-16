@@ -17,8 +17,10 @@ Some LinkPlay / legacy devices use **WiFi Direct** multiroom: slaves appear on *
 - **Internal player registry** (`PlayerBase._all_instances` and helpers): allows **WiFi Direct** linking **without** always requiring integration wiring when instances are created in-process; when hosts need cross-process discovery, **`all_players_finder`** remains the integration hook.
 
 ### 3. Cross-coordinator inference
-- When a device reports **solo** but **another** known master’s slave list includes this device’s **UUID**, infer **slave** role for group membership display (documented integration pattern).
+- When a device reports **solo** but **another** known master’s **cached** slave list (from that master’s own `get_device_group_info()` refresh) includes this device’s **UUID**, infer **slave** role for group membership display (documented integration pattern).
+- **Do not HTTP-query other players during this player’s refresh.** Live `getSlaveList` against every solo/master used to serialize all coordinators behind one unreachable speaker (~16s per poll; wiim #273). A slave that polls before the master has cached its list waits until the master’s next refresh to be linked.
 
 ## Consequences
 - Integrations that support WiFi Direct groups **should** provide **`all_players_finder`** (and UUID-aware **`player_finder`**) where slaves are not reachable at the IP the user configured.
 - Changes to registry lifetime or UUID normalization are **high regression** areas for `group_members` and master/slave UIs.
+- Cross-player grouping inference is **cache-only**. Restoring live HTTP to other devices in `_check_if_slave_of_any_master` would reintroduce the multi-device poll stall.

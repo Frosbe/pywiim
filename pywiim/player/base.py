@@ -78,6 +78,12 @@ class PlayerBase:
         # Independent of Group objects (which are for linking Player objects)
         self._detected_role: str = "solo"  # Default to solo until detected
 
+        # Last slave list observed on THIS device's own refresh. Other players
+        # read these caches for WiFi Direct role inference — they must not HTTP
+        # to this host during their poll (wiim #273).
+        self._group_slave_hosts: list[str] = []
+        self._group_slave_uuids: list[str] = []
+
         # Cached audio output status (updated via refresh())
         self._audio_output_status: dict[str, Any] | None = None
         self._last_audio_output_check: float = 0  # Track when audio output status was last fetched

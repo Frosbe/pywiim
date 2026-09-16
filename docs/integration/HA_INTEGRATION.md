@@ -2705,7 +2705,8 @@ player = Player(
 # - Only the master knows the slave list (via getSlaveList API)
 # - pywiim uses all_players_finder to:
 #   1. Link slaves by UUID when IP matching fails (10.10.10.x IPs not known to HA)
-#   2. Check if any master lists this device as a slave (correct role detection)
+#   2. Check if any master's cached slave list includes this device (correct role detection)
+# - Other players are never HTTP-queried during this poll (an offline speaker must not stall the rest)
 # - No UUID lookup implementation needed in player_finder - pywiim handles it internally
 ```
 

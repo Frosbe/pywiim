@@ -18,6 +18,7 @@ It handles protocol detection, SSL/TLS, retry logic, and response parsing.
 from __future__ import annotations
 
 import asyncio
+import errno
 import ipaddress
 import json
 import logging
@@ -51,6 +52,64 @@ from .ssl import create_wiim_ssl_context
 _LOGGER = logging.getLogger(__name__)
 
 HEADERS: dict[str, str] = {"Connection": "close"}
+
+# After this many hard connect failures, skip further HTTP until cooldown expires.
+# Prevents 3×timeout retry loops against a speaker that has been unplugged (wiim #273).
+CONNECT_FAILURES_BEFORE_COOLDOWN = 2
+CONNECT_FAILURE_COOLDOWN = 30.0
+
+_HARD_CONNECT_ERRNOS = {
+    errno.ECONNREFUSED,
+    errno.ENETUNREACH,
+    errno.EHOSTUNREACH,
+    errno.ECONNRESET,
+    errno.ENETDOWN,
+}
+if hasattr(errno, "EHOSTDOWN"):
+    _HARD_CONNECT_ERRNOS.add(errno.EHOSTDOWN)
+if hasattr(errno, "WSAECONNREFUSED"):
+    _HARD_CONNECT_ERRNOS.add(errno.WSAECONNREFUSED)
+
+_HARD_CONNECT_MARKERS = (
+    "cannot connect to host",
+    "connect call failed",
+    "connection refused",
+    "network is unreachable",
+    "no route to host",
+    "name or service not known",
+)
+
+
+def is_hard_connect_failure(err: BaseException) -> bool:
+    """Return True when retries cannot help because the host is unreachable.
+
+    Timeouts still retry (the device may just be slow). Connection refused /
+    no-route / DNS failures fail immediately.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = err
+    found_hard = False
+
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, aiohttp.ClientConnectorError):
+            found_hard = True
+        elif isinstance(current, (ConnectionRefusedError, ConnectionResetError)):
+            found_hard = True
+        elif isinstance(current, OSError) and current.errno in _HARD_CONNECT_ERRNOS:
+            found_hard = True
+        else:
+            text = str(current).lower()
+            if any(marker in text for marker in _HARD_CONNECT_MARKERS):
+                found_hard = True
+
+        nxt: BaseException | None = current.__cause__
+        if nxt is None:
+            last_error = getattr(current, "last_error", None)
+            nxt = last_error if isinstance(last_error, BaseException) else current.__context__
+        current = nxt
+
+    return found_hard
 
 
 class ApiResponse(NamedTuple):
@@ -168,6 +227,10 @@ class BaseWiiMClient:
         self._error_history: list[dict[str, Any]] = []  # Last 20 errors
         self._last_error: dict[str, Any] | None = None
 
+        # Circuit breaker for hosts that stay unreachable (unplugged / powered off)
+        self._consecutive_connect_failures = 0
+        self._connect_cooldown_until = 0.0
+
     async def _ensure_session(self) -> None:
         """Create aiohttp session bound to current loop if needed."""
         if self._session is None or self._session.closed:
@@ -178,6 +241,23 @@ class BaseWiiMClient:
     def _is_loop_closed_error(err: RuntimeError) -> bool:
         """Return True if the RuntimeError indicates a closed event loop."""
         return "Event loop is closed" in str(err)
+
+    def _record_connect_failure(self) -> None:
+        """Count a hard connect failure and enter cooldown after a short streak."""
+        self._consecutive_connect_failures += 1
+        if self._consecutive_connect_failures >= CONNECT_FAILURES_BEFORE_COOLDOWN:
+            self._connect_cooldown_until = time.monotonic() + CONNECT_FAILURE_COOLDOWN
+            _LOGGER.debug(
+                "Connect cooldown for %s after %d consecutive failures (%.0fs)",
+                self.host,
+                self._consecutive_connect_failures,
+                CONNECT_FAILURE_COOLDOWN,
+            )
+
+    def _clear_connect_failure(self) -> None:
+        """Reset connect-failure tracking after a successful request."""
+        self._consecutive_connect_failures = 0
+        self._connect_cooldown_until = 0.0
 
     async def _handle_loop_closed_session(self, err: RuntimeError) -> None:
         """Reset client session when its originating event loop was closed."""
@@ -404,6 +484,12 @@ class BaseWiiMClient:
 
         kwargs.setdefault("headers", HEADERS)
 
+        if time.monotonic() < self._connect_cooldown_until:
+            raise WiiMConnectionError(
+                f"Request skipped: {self.host} is in connect cooldown after consecutive failures",
+                endpoint=endpoint,
+            )
+
         # Use firmware-specific retry logic
         retry_count = self._capabilities.get("retry_count", 3)
         is_legacy_device = self._capabilities.get("is_legacy_device", False)
@@ -437,6 +523,7 @@ class BaseWiiMClient:
                     if len(self._request_times) > 100:
                         self._request_times.pop(0)
 
+                self._clear_connect_failure()
                 return result
 
             except (aiohttp.ClientError, WiiMConnectionError) as err:
@@ -471,7 +558,10 @@ class BaseWiiMClient:
                     if len(self._error_history) > 20:
                         self._error_history.pop(0)
 
-                if attempt == retry_count - 1:
+                hard_fail = is_hard_connect_failure(err)
+                if hard_fail or attempt == retry_count - 1:
+                    if hard_fail:
+                        self._record_connect_failure()
                     # Get comprehensive device info for enhanced error context
                     device_info = {}
                     try:
@@ -495,12 +585,14 @@ class BaseWiiMClient:
                             err,
                             (aiohttp.ClientConnectorError, aiohttp.ServerDisconnectedError, WiiMConnectionError),
                         )
+                        or hard_fail
                         else WiiMRequestError
                     )
+                    attempts_used = attempt + 1
                     raise error_cls(
-                        f"Request failed after {retry_count} attempts: {err}",
+                        f"Request failed after {attempts_used} attempts: {err}",
                         endpoint=endpoint,
-                        attempts=retry_count,
+                        attempts=attempts_used,
                         last_error=err,
                         device_info=device_info,
                     ) from err

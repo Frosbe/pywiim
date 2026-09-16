@@ -432,8 +432,7 @@ class TestBaseWiiMClientRequest:
 
     @pytest.mark.asyncio
     async def test_request_retry_on_failure(self, mock_aiohttp_session):
-        """Test request retries on failure."""
-        # Mock response that fails first time, succeeds second
+        """Test request retries on transient disconnect, not hard connect failures."""
         mock_response = MagicMock()
         mock_response.status = 200
         mock_response.text = AsyncMock(return_value='{"status": "ok"}')
@@ -441,10 +440,9 @@ class TestBaseWiiMClientRequest:
         mock_response.__aenter__ = AsyncMock(return_value=mock_response)
         mock_response.__aexit__ = AsyncMock(return_value=None)
 
-        # First call fails with ClientError (retryable), second succeeds
         mock_aiohttp_session.request = AsyncMock(
             side_effect=[
-                aiohttp.ClientConnectorError(MagicMock(), OSError("Connection failed")),
+                aiohttp.ServerDisconnectedError("Server disconnected"),
                 mock_response,
             ]
         )
@@ -459,20 +457,16 @@ class TestBaseWiiMClientRequest:
 
         with patch.object(client, "_get_ssl_context", new_callable=AsyncMock) as mock_ssl:
             mock_ssl.return_value = None
-            with patch("asyncio.sleep", new_callable=AsyncMock):  # Skip actual sleep
+            with patch("asyncio.sleep", new_callable=AsyncMock):
                 result = await client._request("/api/status")
 
                 assert result.parsed == {"status": "ok"}
-                # Should have retried, so called at least twice
                 assert mock_aiohttp_session.request.call_count >= 2
 
     @pytest.mark.asyncio
     async def test_request_max_retries_exceeded(self, mock_aiohttp_session):
-        """Test request raises error after max retries."""
-        # Mock response that always fails with retryable error
-        mock_aiohttp_session.request = AsyncMock(
-            side_effect=aiohttp.ClientConnectorError(MagicMock(), OSError("Connection failed"))
-        )
+        """Test request raises error after max retries for transient errors."""
+        mock_aiohttp_session.request = AsyncMock(side_effect=aiohttp.ServerDisconnectedError("Server disconnected"))
         mock_aiohttp_session.closed = False
 
         client = BaseWiiMClient(
@@ -484,14 +478,60 @@ class TestBaseWiiMClientRequest:
 
         with patch.object(client, "_get_ssl_context", new_callable=AsyncMock) as mock_ssl:
             mock_ssl.return_value = None
-            with patch("asyncio.sleep", new_callable=AsyncMock):  # Skip actual sleep
+            with patch("asyncio.sleep", new_callable=AsyncMock):
                 with pytest.raises(WiiMConnectionError) as exc_info:
                     await client._request("/api/status")
 
-                # Error message may vary, but should indicate failure
                 assert "failed" in str(exc_info.value).lower() or "attempts" in str(exc_info.value).lower()
-                # Should have retried
                 assert mock_aiohttp_session.request.call_count >= 2
+
+    @pytest.mark.asyncio
+    async def test_request_hard_connect_failure_does_not_retry(self, mock_aiohttp_session):
+        """Unreachable hosts fail on the first attempt (wiim #273)."""
+        mock_aiohttp_session.request = AsyncMock(
+            side_effect=aiohttp.ClientConnectorError(MagicMock(), OSError("Connection failed"))
+        )
+        mock_aiohttp_session.closed = False
+
+        client = BaseWiiMClient(
+            host="192.168.1.100",
+            session=mock_aiohttp_session,
+            capabilities={"retry_count": 3},
+        )
+        client._endpoint = "http://192.168.1.100:80"
+
+        with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            with pytest.raises(WiiMConnectionError):
+                await client._request("/api/status")
+
+        assert mock_aiohttp_session.request.call_count == 1
+        mock_sleep.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_request_connect_cooldown_skips_after_consecutive_failures(self, mock_aiohttp_session):
+        """After consecutive hard failures, further requests skip HTTP until cooldown."""
+        from pywiim.api.base import CONNECT_FAILURES_BEFORE_COOLDOWN
+
+        mock_aiohttp_session.request = AsyncMock(
+            side_effect=aiohttp.ClientConnectorError(MagicMock(), OSError("Connection failed"))
+        )
+        mock_aiohttp_session.closed = False
+
+        client = BaseWiiMClient(
+            host="192.168.1.100",
+            session=mock_aiohttp_session,
+            capabilities={"retry_count": 1},
+        )
+        client._endpoint = "http://192.168.1.100:80"
+
+        for _ in range(CONNECT_FAILURES_BEFORE_COOLDOWN):
+            with pytest.raises(WiiMConnectionError):
+                await client._request("/api/status")
+
+        calls_before_cooldown = mock_aiohttp_session.request.call_count
+        with pytest.raises(WiiMConnectionError, match="connect cooldown"):
+            await client._request("/api/status")
+        assert mock_aiohttp_session.request.call_count == calls_before_cooldown
 
     @pytest.mark.asyncio
     async def test_request_retry_count_zero_raises(self, mock_aiohttp_session):
@@ -622,9 +662,7 @@ class TestBaseWiiMClientRequest:
     @pytest.mark.asyncio
     async def test_request_legacy_device_backoff(self, mock_aiohttp_session):
         """Test request uses longer backoff for legacy devices."""
-        mock_aiohttp_session.request = AsyncMock(
-            side_effect=aiohttp.ClientConnectorError(MagicMock(), OSError("Connection failed"))
-        )
+        mock_aiohttp_session.request = AsyncMock(side_effect=aiohttp.ServerDisconnectedError("Server disconnected"))
         mock_aiohttp_session.closed = False
 
         client = BaseWiiMClient(

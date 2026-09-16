@@ -161,7 +161,7 @@ pywiim handles this automatically when `all_players_finder` is provided:
    - First tries `player_finder(ip)` (fails for internal IPs)
    - Then searches `all_players_finder()` results by UUID to find the matching Player
 
-2. **Slave role detection**: pywiim uses `all_players_finder` to check if any known master lists this device as a slave, enabling correct role detection.
+2. **Slave role detection**: pywiim uses `all_players_finder` to check if any known master's **cached** slave UUID list (from that master's own refresh) includes this device. It does **not** HTTP-query other players during this poll.
 
 ```python
 # Example for Home Assistant integration

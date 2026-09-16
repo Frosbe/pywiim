@@ -383,23 +383,50 @@ class TestSynchronizeGroupStateIntegration:
     @pytest.mark.asyncio
     async def test_synchronize_triggers_cross_coordinator_check(self, group_ops, mock_player):
         """Test _synchronize_group_state calls cross-coordinator check when solo."""
-        # Create a master that has us in their slave list
+        from pywiim.models import DeviceGroupInfo
+
+        mock_player.client.get_device_group_info = AsyncMock(return_value=DeviceGroupInfo(role="solo"))
+
         master = MagicMock()
         master._detected_role = "master"
         master.host = "192.168.1.100"
+        master.available = True
         master._group = MagicMock()
         master._group.slaves = []
+        master._group_slave_uuids = ["SLAVE-UUID-1234"]
+        master._group_slave_hosts = ["10.10.10.92"]
         master.client = MagicMock()
-        master.client.get_slaves_info = AsyncMock(return_value=[{"uuid": "SLAVE-UUID-1234", "ip": "10.10.10.92"}])
+        master.client.get_slaves_info = AsyncMock(side_effect=AssertionError("must not HTTP"))
 
-        # Set up all_players_finder to return the master
         mock_player._all_players_finder = MagicMock(return_value=[mock_player, master])
 
-        # Run synchronize - should detect we're a slave via cross-coordinator check
         await group_ops._synchronize_group_state()
 
-        # Should have updated role to slave
         assert mock_player._detected_role == "slave"
+        master.client.get_slaves_info.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_synchronize_caches_own_slave_list(self, group_ops, mock_player):
+        """Own get_device_group_info result is cached for other players to read."""
+        from pywiim.models import DeviceGroupInfo
+
+        mock_player.client.get_device_group_info = AsyncMock(
+            return_value=DeviceGroupInfo(
+                role="master",
+                master_host=mock_player.host,
+                slave_hosts=["192.168.1.50"],
+                slave_uuids=["OTHER-UUID"],
+                slave_count=1,
+            )
+        )
+        mock_player._all_players_finder = MagicMock(return_value=[mock_player])
+        mock_player._player_finder = MagicMock(return_value=None)
+
+        await group_ops._synchronize_group_state()
+
+        assert mock_player._group_slave_hosts == ["192.168.1.50"]
+        assert mock_player._group_slave_uuids == ["OTHER-UUID"]
+        assert mock_player._detected_role == "master"
 
     @pytest.mark.asyncio
     async def test_synchronize_no_cross_check_without_callback(self, group_ops, mock_player):
@@ -563,7 +590,9 @@ class TestCrossCoordinatorRoleInference:
         master = MagicMock()
         master._detected_role = "master"
         master.host = "192.168.1.100"
+        master.available = True
         master.client = MagicMock()
+        master.client.get_slaves_info = AsyncMock(side_effect=AssertionError("must not HTTP"))
 
         # Create the slave (mock_player) entry in master's group
         slave_entry = MagicMock()
@@ -572,6 +601,8 @@ class TestCrossCoordinatorRoleInference:
 
         master._group = MagicMock()
         master._group.slaves = [slave_entry]
+        master._group_slave_uuids = []
+        master._group_slave_hosts = []
 
         # Mock all_players_finder to return the master
         mock_player._all_players_finder = MagicMock(return_value=[mock_player, master])
@@ -581,42 +612,41 @@ class TestCrossCoordinatorRoleInference:
         assert result == "slave"
 
     @pytest.mark.asyncio
-    async def test_check_if_slave_via_api_query(self, group_ops, mock_player):
-        """Test finding self via API query when not linked in group."""
-        # Create a master that doesn't have us linked in group.slaves
+    async def test_check_if_slave_via_cached_slave_list(self, group_ops, mock_player):
+        """Test finding self via another player's cached slave list (no HTTP)."""
         master = MagicMock()
         master._detected_role = "master"
         master.host = "192.168.1.100"
+        master.available = True
         master._group = MagicMock()
-        master._group.slaves = []  # No slaves linked yet
-
-        # But the master's API returns our UUID in slave list
+        master._group.slaves = []  # Not linked yet
+        master._group_slave_uuids = ["SLAVE-UUID-1234"]
+        master._group_slave_hosts = ["10.10.10.92"]
         master.client = MagicMock()
-        master.client.get_slaves_info = AsyncMock(
-            return_value=[{"uuid": "SLAVE-UUID-1234", "ip": "10.10.10.92", "name": "TestSlave"}]
-        )
+        master.client.get_slaves_info = AsyncMock(side_effect=AssertionError("must not HTTP"))
 
         mock_player._all_players_finder = MagicMock(return_value=[mock_player, master])
 
         result = await group_ops._check_if_slave_of_any_master()
 
         assert result == "slave"
-        master.client.get_slaves_info.assert_called_once()
+        master.client.get_slaves_info.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_check_if_slave_uuid_normalization(self, group_ops, mock_player):
         """Test UUID normalization handles different formats."""
-        # Test with uuid: prefix and different case
         mock_player._device_info = DeviceInfo(uuid="slave-uuid-1234")
 
         master = MagicMock()
         master._detected_role = "master"
         master.host = "192.168.1.100"
+        master.available = True
         master._group = MagicMock()
         master._group.slaves = []
+        master._group_slave_uuids = ["uuid:SLAVE-UUID-1234"]
+        master._group_slave_hosts = []
         master.client = MagicMock()
-        # API returns UUID with prefix and uppercase
-        master.client.get_slaves_info = AsyncMock(return_value=[{"uuid": "uuid:SLAVE-UUID-1234", "ip": "10.10.10.92"}])
+        master.client.get_slaves_info = AsyncMock(side_effect=AssertionError("must not HTTP"))
 
         mock_player._all_players_finder = MagicMock(return_value=[mock_player, master])
 
@@ -637,45 +667,96 @@ class TestCrossCoordinatorRoleInference:
     @pytest.mark.asyncio
     async def test_check_if_slave_skips_non_masters(self, group_ops, mock_player):
         """Test cross-coordinator check skips non-master players."""
-        other_solo = MagicMock()
-        other_solo._detected_role = "solo"
-        other_solo.host = "192.168.1.101"
-        other_solo._group = None
-        other_solo.client = MagicMock()
-        other_solo.client.get_slaves_info = AsyncMock(return_value=[])
+        other_slave = MagicMock()
+        other_slave._detected_role = "slave"
+        other_slave.host = "192.168.1.101"
+        other_slave.available = True
+        other_slave._group = None
+        other_slave._group_slave_uuids = ["SLAVE-UUID-1234"]
+        other_slave._group_slave_hosts = []
+        other_slave.client = MagicMock()
+        other_slave.client.get_slaves_info = AsyncMock(side_effect=AssertionError("must not HTTP"))
 
-        mock_player._all_players_finder = MagicMock(return_value=[mock_player, other_solo])
+        mock_player._all_players_finder = MagicMock(return_value=[mock_player, other_slave])
 
         result = await group_ops._check_if_slave_of_any_master()
 
         assert result is None
+        other_slave.client.get_slaves_info.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_check_if_slave_api_error_continues(self, group_ops, mock_player):
-        """Test cross-coordinator check continues after API error."""
-        # First master has API error
-        master1 = MagicMock()
-        master1._detected_role = "master"
-        master1.host = "192.168.1.100"
-        master1._group = MagicMock()
-        master1._group.slaves = []
-        master1.client = MagicMock()
-        master1.client.get_slaves_info = AsyncMock(side_effect=Exception("Connection timeout"))
+    async def test_check_if_slave_skips_unavailable_without_http(self, group_ops, mock_player):
+        """Offline players must not be HTTP-probed during another player's refresh (wiim #273)."""
+        offline = MagicMock()
+        offline._detected_role = "solo"
+        offline.host = "192.168.1.137"
+        offline.available = False
+        offline._group = None
+        offline._group_slave_uuids = ["SLAVE-UUID-1234"]
+        offline._group_slave_hosts = []
+        offline.client = MagicMock()
+        offline.client.get_slaves_info = AsyncMock(side_effect=AssertionError("must not HTTP to offline device"))
 
-        # Second master has our slave
+        mock_player._all_players_finder = MagicMock(return_value=[mock_player, offline])
+
+        result = await group_ops._check_if_slave_of_any_master()
+
+        assert result is None
+        offline.client.get_slaves_info.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_check_if_slave_does_not_http_query_empty_cache(self, group_ops, mock_player):
+        """Empty cached slave list must not fall back to live getSlaveList."""
+        master = MagicMock()
+        master._detected_role = "master"
+        master.host = "192.168.1.100"
+        master.available = True
+        master._group = MagicMock()
+        master._group.slaves = []
+        master._group_slave_uuids = []
+        master._group_slave_hosts = []
+        master.client = MagicMock()
+        master.client.get_slaves_info = AsyncMock(return_value=[{"uuid": "SLAVE-UUID-1234"}])
+
+        mock_player._all_players_finder = MagicMock(return_value=[mock_player, master])
+
+        result = await group_ops._check_if_slave_of_any_master()
+
+        assert result is None
+        master.client.get_slaves_info.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_check_if_slave_skips_unavailable_then_uses_cache(self, group_ops, mock_player):
+        """Unavailable masters are skipped; a later cached master still matches."""
+        offline = MagicMock()
+        offline._detected_role = "master"
+        offline.host = "192.168.1.100"
+        offline.available = False
+        offline._group = MagicMock()
+        offline._group.slaves = []
+        offline._group_slave_uuids = []
+        offline._group_slave_hosts = []
+        offline.client = MagicMock()
+        offline.client.get_slaves_info = AsyncMock(side_effect=Exception("Connection timeout"))
+
         master2 = MagicMock()
         master2._detected_role = "master"
         master2.host = "192.168.1.101"
+        master2.available = True
         master2._group = MagicMock()
         master2._group.slaves = []
+        master2._group_slave_uuids = ["SLAVE-UUID-1234"]
+        master2._group_slave_hosts = []
         master2.client = MagicMock()
-        master2.client.get_slaves_info = AsyncMock(return_value=[{"uuid": "SLAVE-UUID-1234", "ip": "10.10.10.92"}])
+        master2.client.get_slaves_info = AsyncMock(side_effect=AssertionError("must not HTTP"))
 
-        mock_player._all_players_finder = MagicMock(return_value=[mock_player, master1, master2])
+        mock_player._all_players_finder = MagicMock(return_value=[mock_player, offline, master2])
 
         result = await group_ops._check_if_slave_of_any_master()
 
         assert result == "slave"
+        offline.client.get_slaves_info.assert_not_called()
+        master2.client.get_slaves_info.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_check_if_slave_callback_error(self, group_ops, mock_player):
@@ -689,13 +770,15 @@ class TestCrossCoordinatorRoleInference:
     @pytest.mark.asyncio
     async def test_check_if_slave_creates_group_on_master(self, group_ops, mock_player):
         """Test cross-coordinator creates group on master if it doesn't exist."""
-        # Master without a group object
         master = MagicMock()
         master._detected_role = "solo"  # Not detected as master yet
         master.host = "192.168.1.100"
+        master.available = True
         master._group = None  # No group yet
+        master._group_slave_uuids = ["SLAVE-UUID-1234"]
+        master._group_slave_hosts = ["10.10.10.92"]
         master.client = MagicMock()
-        master.client.get_slaves_info = AsyncMock(return_value=[{"uuid": "SLAVE-UUID-1234", "ip": "10.10.10.92"}])
+        master.client.get_slaves_info = AsyncMock(side_effect=AssertionError("must not HTTP"))
 
         mock_player._all_players_finder = MagicMock(return_value=[mock_player, master])
 
@@ -704,3 +787,4 @@ class TestCrossCoordinatorRoleInference:
         assert result == "slave"
         assert master._detected_role == "master"  # Should be updated
         assert master._group is not None  # Group should be created
+        master.client.get_slaves_info.assert_not_called()

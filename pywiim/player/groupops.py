@@ -247,6 +247,8 @@ class GroupOperations:
                 detected_role = group_info.role
                 slave_hosts = group_info.slave_hosts
                 slave_uuids = group_info.slave_uuids
+                self.player._group_slave_hosts = list(slave_hosts)
+                self.player._group_slave_uuids = list(slave_uuids)
 
                 # Trust get_device_group_info() result - it checks group field and master info
                 # No override needed - the group field is always correct
@@ -263,6 +265,8 @@ class GroupOperations:
             detected_role = "solo"
             slave_hosts = []
             slave_uuids = []
+            self.player._group_slave_hosts = []
+            self.player._group_slave_uuids = []
 
         # Cross-coordinator role inference for WiFi Direct multiroom
         # WiFi Direct slaves report group="0" (solo) because they don't know they're in a group.
@@ -716,9 +720,15 @@ class GroupOperations:
         because they don't know they're in a group. Only the master knows.
 
         This method:
-        1. Gets all known players via internal registry (automatic, no callback needed)
-        2. For each known master, checks if their slave list contains our UUID
-        3. For potential masters (not solo), queries their slave list directly
+        1. Gets all known players via callback or internal registry
+        2. For each known master, checks if their linked slave list contains our UUID
+        3. Falls back to slave UUID/host lists cached on those players during *their*
+           own refresh — never HTTP-queries another device from this poll
+
+        Live ``getSlaveList`` against other hosts used to run on every solo poll.
+        When one speaker went offline, every other coordinator paid that device's
+        full retry budget (wiim #273). WiFi Direct slaves that refresh before the
+        master has cached its list wait until the master's next poll to be linked.
 
         Returns:
             "slave" if found in a master's slave list, None otherwise.
@@ -786,10 +796,11 @@ class GroupOperations:
                         group.add_slave(self.player)
                     return "slave"
 
-        # Phase 2: Query potential masters' slave lists (slower, requires API calls)
-        # This handles the case where slave refreshes before master has linked it
+        # Phase 2: Use slave lists cached on other players' own refreshes.
+        # Never HTTP-query another device here — that stalls every coordinator
+        # when one speaker is offline (wiim #273).
         _LOGGER.debug(
-            "Phase 2: Querying potential masters for slave list membership " "(my_uuid=%s, normalized=%s)",
+            "Phase 2: Checking cached slave lists for membership " "(my_uuid=%s, normalized=%s)",
             self.player.uuid,
             my_uuid_normalized,
         )
@@ -799,13 +810,15 @@ class GroupOperations:
             if other_player is self.player:
                 continue
 
-            # Skip players we've already checked via group.slaves
-            # Only query players that might be masters but haven't linked us yet
-            detected_role = getattr(other_player, "_detected_role", "solo")
+            if getattr(other_player, "available", True) is False:
+                _LOGGER.debug(
+                    "Skipping %s (unavailable)",
+                    getattr(other_player, "host", "unknown"),
+                )
+                continue
 
-            # Only query players that are known masters or could potentially be masters
-            # A master might not have detected their role yet if they haven't refreshed
-            if detected_role not in ("master", "solo"):
+            detected_role = getattr(other_player, "_detected_role", "solo")
+            if detected_role == "slave":
                 _LOGGER.debug(
                     "Skipping %s (role=%s, not a potential master)",
                     getattr(other_player, "host", "unknown"),
@@ -813,82 +826,51 @@ class GroupOperations:
                 )
                 continue
 
-            # For known masters or potential masters, query their slave list
-            client = getattr(other_player, "client", None)
-            if client is None:
-                _LOGGER.debug(
-                    "Skipping %s (no client available)",
-                    getattr(other_player, "host", "unknown"),
-                )
+            cached_uuids = getattr(other_player, "_group_slave_uuids", None)
+            cached_hosts = getattr(other_player, "_group_slave_hosts", None)
+            if not isinstance(cached_uuids, list):
+                cached_uuids = []
+            if not isinstance(cached_hosts, list):
+                cached_hosts = []
+            if not cached_uuids and not cached_hosts:
                 continue
 
             other_host = getattr(other_player, "host", "unknown")
-            try:
-                # Query the device's slave list directly
-                _LOGGER.debug(
-                    "Querying slave list from potential master %s (role=%s)",
-                    other_host,
-                    detected_role,
-                )
-                slaves_info = await client.get_slaves_info()
-
-                if not slaves_info:
-                    _LOGGER.debug(
-                        "Potential master %s has no slaves in its list",
-                        other_host,
-                    )
+            matched = False
+            for slave_uuid in cached_uuids:
+                if not slave_uuid:
                     continue
+                if self._normalize_uuid(str(slave_uuid)) == my_uuid_normalized:
+                    matched = True
+                    break
+            if not matched and self.player.host and self.player.host in cached_hosts:
+                matched = True
 
+            if not matched:
                 _LOGGER.debug(
-                    "Master %s has %d slaves: %s",
+                    "Cached slave list from %s does not include %s",
                     other_host,
-                    len(slaves_info),
-                    [s.get("uuid", "no-uuid") for s in slaves_info],
-                )
-
-                for slave_info in slaves_info:
-                    slave_uuid = slave_info.get("uuid", "")
-                    if slave_uuid:
-                        normalized_slave = self._normalize_uuid(slave_uuid)
-                        if normalized_slave == my_uuid_normalized:
-                            _LOGGER.info(
-                                "Cross-coordinator: Found self in %s's slave list via API query "
-                                "(uuid: %s, normalized: %s)",
-                                other_host,
-                                slave_uuid,
-                                normalized_slave,
-                            )
-                            # Link ourselves to this master's group
-                            group = getattr(other_player, "_group", None)
-                            if group is None:
-                                # Create group on master if it doesn't exist
-                                from ..group import Group as GroupClass
-
-                                group = GroupClass(other_player)
-                                other_player._group = group
-                                other_player._detected_role = "master"
-
-                            if self.player not in getattr(group, "slaves", []):
-                                group.add_slave(self.player)
-
-                            return "slave"
-                        else:
-                            _LOGGER.debug(
-                                "UUID mismatch with slave in %s's list: "
-                                "slave_uuid=%s (normalized=%s) vs my_uuid=%s (normalized=%s)",
-                                other_host,
-                                slave_uuid,
-                                normalized_slave,
-                                self.player.uuid,
-                                my_uuid_normalized,
-                            )
-            except Exception as err:
-                _LOGGER.debug(
-                    "Failed to query slave list from %s: %s",
-                    other_host,
-                    err,
+                    self.player.host,
                 )
                 continue
+
+            _LOGGER.info(
+                "Cross-coordinator: Found self in %s's cached slave list (uuid: %s)",
+                other_host,
+                self.player.uuid,
+            )
+            group = getattr(other_player, "_group", None)
+            if group is None:
+                from ..group import Group as GroupClass
+
+                group = GroupClass(other_player)
+                other_player._group = group
+                other_player._detected_role = "master"
+
+            if self.player not in getattr(group, "slaves", []):
+                group.add_slave(self.player)
+
+            return "slave"
 
         _LOGGER.debug(
             "Cross-coordinator check complete: %s not found in any master's slave list",
