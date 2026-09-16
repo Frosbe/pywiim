@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.7] - 2026-09-16
+
 ### Fixed
 - **Offline speaker no longer stalls every other player's poll** ([wiim #273](https://github.com/mjcumming/wiim/issues/273)) — WiFi Direct role inference used to call `getSlaveList` on every other solo/master during each refresh. One unreachable host made every coordinator wait on that device's 3× timeout retry loop (~16s). Inference now reads slave UUID/host lists cached from each player's own poll, skips unavailable players, and never HTTP-queries another device from this path.
 - **Hard connect failures fail fast** ([wiim #273](https://github.com/mjcumming/wiim/issues/273)) — `Cannot connect to host` / connection refused no longer consume the full retry budget. After two consecutive hard failures the client short-circuits requests for 30s (cleared on the next success). Transient disconnects still retry.
