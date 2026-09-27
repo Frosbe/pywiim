@@ -1025,6 +1025,21 @@ class TestStateManager:
         assert mock_status.play_state is None
 
     @pytest.mark.asyncio
+    async def test_refresh_ignores_unrecognized_transport_state(self, state_manager, mock_player):
+        """Transport values outside PlayerStatus are not written."""
+        mock_status = PlayerStatus(volume=40)
+        mock_player.client.get_player_status_model = AsyncMock(return_value=mock_status)
+        mock_player._upnp_client = self._upnp_client_with_transport("CUSTOM_STATE")
+        mock_player._profile = self._mkii_profile()
+        type(mock_player).upnp_is_healthy = PropertyMock(return_value=None)
+
+        await state_manager._refresh_core_status()
+
+        call_args = mock_player._state_synchronizer.update_from_http.call_args[0][0]
+        assert "play_state" not in call_args
+        assert mock_status.play_state is None
+
+    @pytest.mark.asyncio
     async def test_refresh_skips_transport_poll_when_upnp_unhealthy(self, state_manager, mock_player):
         """Unhealthy UPnP skips GetTransportInfo, same gate as GetVolume."""
         mock_status = PlayerStatus(volume=40)

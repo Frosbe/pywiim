@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import aiohttp
 
@@ -33,6 +33,16 @@ if TYPE_CHECKING:
     from . import Player
 
 _LOGGER = logging.getLogger(__name__)
+
+_PlayerPlayState = Literal["play", "pause", "stop", "idle", "buffering"]
+_PLAYER_PLAY_STATES: frozenset[str] = frozenset({"play", "pause", "stop", "idle", "buffering"})
+
+
+def _coerce_player_play_state(value: str | None) -> _PlayerPlayState | None:
+    """Keep only values ``PlayerStatus.play_state`` accepts."""
+    if value in _PLAYER_PLAY_STATES:
+        return cast(_PlayerPlayState, value)
+    return None
 
 # UPnP retry cooldown - wait this many seconds between failed creation attempts
 UPNP_RETRY_COOLDOWN = 60.0
@@ -694,7 +704,7 @@ class StateManager:
                 err,
             )
 
-    async def _poll_upnp_transport_state(self) -> str | None:
+    async def _poll_upnp_transport_state(self) -> _PlayerPlayState | None:
         """Return normalized play state from AVTransport.GetTransportInfo.
 
         Used when the device profile says play state comes from UPnP and the
@@ -727,7 +737,7 @@ class StateManager:
         raw_state = transport.get("CurrentTransportState")
         if not raw_state:
             return None
-        normalized = normalize_play_state(str(raw_state))
+        normalized = _coerce_player_play_state(normalize_play_state(str(raw_state)))
         _LOGGER.debug(
             "Got play_state from UPnP GetTransportInfo for %s: %s -> %s",
             self.player.client.host,

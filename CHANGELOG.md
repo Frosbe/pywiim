@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.9] - 2026-09-27
+
+### Fixed
+- **MkII transport state typing** — `GetTransportInfo` values are kept only when they match `PlayerStatus.play_state` (`play`, `pause`, `stop`, `idle`, `buffering`). Unrecognized transport strings are ignored instead of assigned.
+
 ## [2.3.8] - 2026-09-27
 
 ### Fixed
