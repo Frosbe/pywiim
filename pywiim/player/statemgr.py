@@ -336,6 +336,7 @@ class StateManager:
                 # _refresh_core_status() ran before the profile was set and skipped
                 # GetControlDeviceInfo. Re-seed the source now that the profile is known.
                 await self._seed_source_after_profile()
+                await self._seed_transport_after_profile()
 
             # Trigger-based fetching (skip for slaves - they get data from master)
             if not self.player.is_slave:
@@ -511,6 +512,14 @@ class StateManager:
                         err,
                     )
 
+        # Audio Pro MkII getStatusEx has no status/play_state. Home Assistant
+        # polls; it does not subscribe to UPnP events, so read AVTransport here
+        # the same way volume is read above. See wiim #274.
+        if status is not None and status.play_state is None:
+            upnp_play_state = await self._poll_upnp_transport_state()
+            if upnp_play_state is not None:
+                status.play_state = upnp_play_state
+
         # Update StateSynchronizer with HTTP data
         status_dict = status.model_dump(exclude_none=False) if status else {}
         if "entity_picture" in status_dict:
@@ -526,6 +535,11 @@ class StateManager:
             status_dict["muted"] = upnp_mute
         if upnp_source is not None:
             status_dict["source"] = upnp_source
+
+        # A missing HTTP status field dumps as play_state=None. Writing that
+        # None clears the synchronizer on every poll (MkII never sends it).
+        if status_dict.get("play_state") is None:
+            status_dict.pop("play_state", None)
 
         self.player._state_synchronizer.update_from_http(status_dict)
 
@@ -679,6 +693,73 @@ class StateManager:
                 self.player.client.host,
                 err,
             )
+
+    async def _poll_upnp_transport_state(self) -> str | None:
+        """Return normalized play state from AVTransport.GetTransportInfo.
+
+        Used when the device profile says play state comes from UPnP and the
+        HTTP status payload did not include one. WiiM devices that already
+        report ``status`` over HTTP do not reach this call.
+        """
+        profile = self.player._profile
+        upnp = self.player._upnp_client
+        if (
+            profile is None
+            or profile.state_sources.play_state != "upnp"
+            or upnp is None
+            or not upnp.av_transport
+            or self.player.upnp_is_healthy is False
+        ):
+            return None
+
+        try:
+            transport = await upnp.get_transport_info()
+        except Exception as err:
+            _LOGGER.debug(
+                "UPnP GetTransportInfo failed for %s: %s",
+                self.player.client.host,
+                err,
+            )
+            return None
+
+        if not isinstance(transport, dict):
+            return None
+        raw_state = transport.get("CurrentTransportState")
+        if not raw_state:
+            return None
+        normalized = normalize_play_state(str(raw_state))
+        _LOGGER.debug(
+            "Got play_state from UPnP GetTransportInfo for %s: %s -> %s",
+            self.player.client.host,
+            raw_state,
+            normalized,
+        )
+        return normalized
+
+    async def _seed_transport_after_profile(self) -> None:
+        """Seed play state via GetTransportInfo once the profile is known.
+
+        The first full refresh fetches status before device info, so the MkII
+        profile is not set yet and ``_refresh_core_status`` skips the transport
+        poll. This fills that gap on startup.
+        """
+        if self.player.is_slave:
+            return
+        status = self.player._status_model
+        if status is None or status.play_state is not None:
+            return
+
+        upnp_play_state = await self._poll_upnp_transport_state()
+        if upnp_play_state is None:
+            return
+
+        status.play_state = upnp_play_state
+        self.player._state_synchronizer.update_from_http({"play_state": upnp_play_state})
+        _LOGGER.debug(
+            "Seeded play_state from GetTransportInfo after profile set for %s: %s",
+            self.player.client.host,
+            upnp_play_state,
+        )
 
     async def _handle_triggers(self, status: PlayerStatus, track_changed: bool) -> None:
         """Handle trigger-based fetching (track change, source change, EQ change).

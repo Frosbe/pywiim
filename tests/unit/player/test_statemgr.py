@@ -941,3 +941,126 @@ class TestStateManager:
         calls = mock_player._state_synchronizer.update_from_http.call_args_list
         sources = [c[0][0].get("source") for c in calls if "source" in c[0][0]]
         assert "rca" in sources, f"Expected 'rca' in source calls: {sources}"
+
+    @staticmethod
+    def _mkii_profile() -> MagicMock:
+        """Profile that takes play state from UPnP, matching Audio Pro MkII."""
+        profile = MagicMock()
+        profile.state_sources.play_state = "upnp"
+        profile.state_sources.source = "http"
+        profile.state_sources.volume = "upnp"
+        profile.state_sources.mute = "upnp"
+        return profile
+
+    @staticmethod
+    def _upnp_client_with_transport(transport_state: str = "PLAYING") -> MagicMock:
+        client = MagicMock()
+        client.rendering_control = MagicMock()
+        client.av_transport = MagicMock()
+        client.get_volume = AsyncMock(return_value=40)
+        client.get_mute = AsyncMock(return_value=False)
+        client.get_transport_info = AsyncMock(return_value={"CurrentTransportState": transport_state})
+        return client
+
+    @pytest.mark.asyncio
+    async def test_refresh_polls_transport_when_http_has_no_play_state(self, state_manager, mock_player):
+        """MkII HTTP status omits play_state; GetTransportInfo fills it (wiim #274)."""
+        mock_status = PlayerStatus(volume=40)
+        mock_player.client.get_player_status_model = AsyncMock(return_value=mock_status)
+        mock_player._upnp_client = self._upnp_client_with_transport("PLAYING")
+        mock_player._profile = self._mkii_profile()
+        type(mock_player).upnp_is_healthy = PropertyMock(return_value=None)
+
+        await state_manager._refresh_core_status()
+
+        mock_player._upnp_client.get_transport_info.assert_awaited_once()
+        assert mock_status.play_state == "play"
+        call_args = mock_player._state_synchronizer.update_from_http.call_args[0][0]
+        assert call_args["play_state"] == "play"
+
+    @pytest.mark.asyncio
+    async def test_refresh_maps_stopped_transport_to_idle(self, state_manager, mock_player):
+        """GetTransportInfo STOPPED normalizes to idle."""
+        mock_status = PlayerStatus(volume=40)
+        mock_player.client.get_player_status_model = AsyncMock(return_value=mock_status)
+        mock_player._upnp_client = self._upnp_client_with_transport("STOPPED")
+        mock_player._profile = self._mkii_profile()
+        type(mock_player).upnp_is_healthy = PropertyMock(return_value=None)
+
+        await state_manager._refresh_core_status()
+
+        assert mock_status.play_state == "idle"
+        call_args = mock_player._state_synchronizer.update_from_http.call_args[0][0]
+        assert call_args["play_state"] == "idle"
+
+    @pytest.mark.asyncio
+    async def test_refresh_skips_transport_poll_when_http_has_play_state(self, state_manager, mock_player):
+        """Devices that already report status over HTTP do not call GetTransportInfo."""
+        mock_status = PlayerStatus(play_state="play", volume=40)
+        mock_player.client.get_player_status_model = AsyncMock(return_value=mock_status)
+        mock_player._upnp_client = self._upnp_client_with_transport("STOPPED")
+        mock_player._profile = self._mkii_profile()
+        type(mock_player).upnp_is_healthy = PropertyMock(return_value=None)
+
+        await state_manager._refresh_core_status()
+
+        mock_player._upnp_client.get_transport_info.assert_not_called()
+        call_args = mock_player._state_synchronizer.update_from_http.call_args[0][0]
+        assert call_args["play_state"] == "play"
+
+    @pytest.mark.asyncio
+    async def test_refresh_omits_missing_play_state_when_transport_poll_fails(self, state_manager, mock_player):
+        """A failed GetTransportInfo must not write play_state=None over the synchronizer."""
+        mock_status = PlayerStatus(volume=40)
+        mock_player.client.get_player_status_model = AsyncMock(return_value=mock_status)
+        mock_player._upnp_client = self._upnp_client_with_transport()
+        mock_player._upnp_client.get_transport_info = AsyncMock(side_effect=Exception("UPnP error"))
+        mock_player._profile = self._mkii_profile()
+        type(mock_player).upnp_is_healthy = PropertyMock(return_value=None)
+
+        await state_manager._refresh_core_status()
+
+        call_args = mock_player._state_synchronizer.update_from_http.call_args[0][0]
+        assert "play_state" not in call_args
+        assert mock_status.play_state is None
+
+    @pytest.mark.asyncio
+    async def test_refresh_skips_transport_poll_when_upnp_unhealthy(self, state_manager, mock_player):
+        """Unhealthy UPnP skips GetTransportInfo, same gate as GetVolume."""
+        mock_status = PlayerStatus(volume=40)
+        mock_player.client.get_player_status_model = AsyncMock(return_value=mock_status)
+        mock_player._upnp_client = self._upnp_client_with_transport("PLAYING")
+        mock_player._profile = self._mkii_profile()
+        type(mock_player).upnp_is_healthy = PropertyMock(return_value=False)
+
+        await state_manager._refresh_core_status()
+
+        mock_player._upnp_client.get_transport_info.assert_not_called()
+        call_args = mock_player._state_synchronizer.update_from_http.call_args[0][0]
+        assert "play_state" not in call_args
+
+    @pytest.mark.asyncio
+    async def test_seed_transport_after_profile_on_full_refresh(self, state_manager, mock_player):
+        """Startup full refresh polls GetTransportInfo after the MkII profile is detected."""
+        mock_status = PlayerStatus(volume=40)
+        mock_info = DeviceInfo(
+            uuid="test-uuid",
+            name="Drumfire",
+            model="Drumfire D-2 Speaker",
+            firmware="audiopro_d2-user 1.56 1.56 1.56.637744",
+        )
+        mock_player.client.get_player_status_model = AsyncMock(return_value=mock_status)
+        mock_player.client.get_device_info_model = AsyncMock(return_value=mock_info)
+        TestStateManager._setup_refresh_mocks(mock_player, state_manager)
+        mock_player._profile = None
+        mock_player._upnp_client = self._upnp_client_with_transport("PAUSED_PLAYBACK")
+        type(mock_player).upnp_is_healthy = PropertyMock(return_value=None)
+
+        with patch.object(mock_player._group_ops, "propagate_metadata_to_slaves", new_callable=MagicMock):
+            await state_manager.refresh(full=True)
+
+        mock_player._upnp_client.get_transport_info.assert_awaited_once()
+        assert mock_player._status_model.play_state == "pause"
+        calls = mock_player._state_synchronizer.update_from_http.call_args_list
+        play_states = [c[0][0].get("play_state") for c in calls if "play_state" in c[0][0]]
+        assert play_states == ["pause"]

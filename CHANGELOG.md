@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.8] - 2026-09-27
+
+### Fixed
+- **Audio Pro MkII playback state** ([wiim #274](https://github.com/mjcumming/wiim/issues/274)) — `getStatusEx` on MkII has no transport field, and Home Assistant does not subscribe to UPnP events. When the device profile takes `play_state` from UPnP and HTTP omitted it, refresh now polls `AVTransport.GetTransportInfo` on the same path as `GetVolume`, including once the profile is detected on the first full refresh. A missing HTTP status is no longer written as `play_state=None`. Group members follow the master, so they leave idle once the master reports playing.
+
 ## [2.3.7] - 2026-09-16
 
 ### Fixed
