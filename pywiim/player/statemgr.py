@@ -44,6 +44,7 @@ def _coerce_player_play_state(value: str | None) -> _PlayerPlayState | None:
         return cast(_PlayerPlayState, value)
     return None
 
+
 # UPnP retry cooldown - wait this many seconds between failed creation attempts
 UPNP_RETRY_COOLDOWN = 60.0
 
