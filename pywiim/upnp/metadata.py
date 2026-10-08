@@ -115,16 +115,7 @@ def parse_didl_metadata(didl_xml: str, *, allow_clear: bool = False) -> dict[str
             elif allow_clear:
                 changes["image_url"] = None
 
-        # Input codec (LinkPlay vendor field song:coding_f). Populated for
-        # fixed inputs (HDMI/optical/line) where getMetaInfo has no codec, e.g.
-        # "AC3" for a Dolby Digital bitstream (values depend on firmware). Matched
-        # by local name because the vendor namespace URI varies by firmware
-        # (www.wiimu.com/song/ vs www.linkplay.com/song/).
-        codec = normalize_codec(_find_first_text_by_local_name(item, "coding_f"))
-        if codec:
-            changes["codec"] = codec
-        elif allow_clear:
-            changes["codec"] = None
+        changes.update(extract_input_codec(item, allow_clear=allow_clear))
 
     except ET.ParseError as err:
         _LOGGER.debug("Failed to parse DIDL-Lite metadata: %s", err)
@@ -140,6 +131,23 @@ def _find_first_text_by_local_name(root: ET.Element, local_name: str) -> str | N
         if element.tag.rsplit("}", 1)[-1] == local_name and element.text and element.text.strip():
             return element.text.strip()
     return None
+
+
+def extract_input_codec(item: ET.Element, *, allow_clear: bool) -> dict[str, str | None]:
+    """Extract the input codec (LinkPlay vendor field song:coding_f) from a DIDL item.
+
+    Populated for fixed inputs (HDMI/optical/line) where getMetaInfo has no
+    codec, e.g. "AC3" for a Dolby Digital bitstream (values depend on
+    firmware). Matched by local name because the vendor namespace URI varies by
+    firmware (www.wiimu.com/song/ vs www.linkplay.com/song/).
+
+    Returns {"codec": <lowercase codec>} when present, {"codec": None} when
+    absent or a placeholder and allow_clear is set, otherwise {}.
+    """
+    codec = normalize_codec(_find_first_text_by_local_name(item, "coding_f"))
+    if codec:
+        return {"codec": codec}
+    return {"codec": None} if allow_clear else {}
 
 
 def parse_getinfoex_response(soap_xml: str) -> dict[str, Any]:

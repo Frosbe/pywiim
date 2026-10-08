@@ -28,6 +28,7 @@ from async_upnp_client.client import UpnpService, UpnpStateVariable
 from async_upnp_client.exceptions import UpnpResponseError
 
 from .client import UpnpClient
+from .metadata import extract_input_codec
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -715,16 +716,7 @@ class UpnpEventer:
                 # Element exists but is empty - clear it only if allowed
                 changes["image_url"] = None
 
-            # Input codec (LinkPlay vendor field song:coding_f); matched by local
-            # name since the vendor namespace URI varies by firmware. Populated
-            # for fixed inputs (HDMI/optical/line), e.g. "AC3" for Dolby Digital.
-            from .metadata import _find_first_text_by_local_name, normalize_codec
-
-            codec = normalize_codec(_find_first_text_by_local_name(item, "coding_f"))
-            if codec:
-                changes["codec"] = codec
-            elif allow_clear:
-                changes["codec"] = None
+            changes.update(extract_input_codec(item, allow_clear=allow_clear))
 
             if any(v is not None for v in changes.values()):
                 _LOGGER.debug(
