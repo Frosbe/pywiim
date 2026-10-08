@@ -717,7 +717,7 @@ class UpnpEventer:
 
             # Input codec (LinkPlay vendor field song:coding_f); matched by local
             # name since the vendor namespace URI varies by firmware. Populated
-            # for fixed inputs (HDMI/optical/line), e.g. "AC3"/"EAC3"/"DTS".
+            # for fixed inputs (HDMI/optical/line), e.g. "AC3" for Dolby Digital.
             from .metadata import _find_first_text_by_local_name, normalize_codec
 
             codec = normalize_codec(_find_first_text_by_local_name(item, "coding_f"))

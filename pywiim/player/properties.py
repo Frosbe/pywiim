@@ -568,8 +568,7 @@ class PlayerProperties:
 
         Prefers the UPnP DIDL codec (LinkPlay ``song:coding_f``), which is the
         only source that reports the codec for fixed inputs (HDMI/optical/line)
-        - e.g. ``ac3``/``eac3``/``dts`` for surround bitstreams, ``pcm`` for
-        stereo. Falls back to the HTTP status codec for network streams
+        - e.g. ``ac3`` for a Dolby Digital bitstream. Falls back to the HTTP status codec for network streams
         (e.g. ``flac``/``mp3``/``aac``).
         """
         merged = self.player._state_synchronizer.get_merged_state()
