@@ -304,6 +304,19 @@ class TestStateSynchronizer:
         sync.update_from_http({"play_state": "play", "source": "spotify"})
         assert sync.get_merged_state()["codec"] is None
 
+    def test_http_codec_none_does_not_mask_upnp_codec_with_profile(self):
+        """Every HTTP poll carries codec=None; it must not override UPnP's codec."""
+        from pywiim.models import DeviceInfo
+        from pywiim.profiles import get_device_profile
+
+        profile = get_device_profile(DeviceInfo(uuid="x", name="Amp", model="WiiM_Amp_Pro", project="WiiM_Amp_Pro"))
+        sync = StateSynchronizer(profile=profile)
+
+        sync.update_from_upnp({"play_state": "playing", "codec": "ac3"}, force_metadata_update=True)
+        sync.update_from_http({"play_state": "play", "codec": None})
+
+        assert sync.get_merged_state()["codec"] == "ac3"
+
 
 class TestGroupStateSynchronizer:
     """Test GroupStateSynchronizer class."""

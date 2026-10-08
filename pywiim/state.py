@@ -900,6 +900,11 @@ class StateSynchronizer:
             if field_name not in data:
                 continue
             value = data.get(field_name)
+            # HTTP status always carries codec=None for fixed inputs (model_dump
+            # includes the declared field). Storing it would win the merge and
+            # mask the UPnP song:coding_f value.
+            if field_name == "codec" and source != "upnp" and not value:
+                continue
             if self._is_leftover_after_source_change(field_name, value):
                 continue
             dest[field_name] = TimestampedField(
