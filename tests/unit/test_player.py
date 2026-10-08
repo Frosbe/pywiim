@@ -175,6 +175,22 @@ class TestPlayerProperties:
         await player.refresh()
         assert player.available is True
 
+    def test_media_codec_prefers_upnp_then_falls_back_to_status(self, mock_client):
+        """media_codec uses the UPnP song:coding_f codec when present, else the status codec."""
+        from pywiim.player import Player
+
+        player = Player(mock_client)
+        player._status_model = PlayerStatus(play_state="play", codec="flac")
+
+        # No UPnP codec yet: status codec (network stream) is used.
+        assert player.media_codec == "flac"
+
+        # Fixed input reports a codec via UPnP DIDL: it wins over the status codec.
+        player._state_synchronizer.update_from_upnp(
+            {"play_state": "playing", "codec": "ac3"}, force_metadata_update=True
+        )
+        assert player.media_codec == "ac3"
+
 
 class TestPlayerRefresh:
     """Test Player refresh method."""

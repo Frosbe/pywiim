@@ -454,6 +454,24 @@ class TestUpnpEventer:
         if "image_url" in changes:
             assert changes["image_url"] == "http://example.com/art.jpg"
 
+    def test_parse_didl_metadata_extracts_input_codec(self):
+        """Event-path parser extracts song:coding_f regardless of vendor namespace URI."""
+        from pywiim.upnp.eventer import UpnpEventer
+
+        eventer = UpnpEventer(MagicMock(), MagicMock(), "test-uuid")
+
+        didl_xml = (
+            '<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" '
+            'xmlns:song="www.wiimu.com/song/">'
+            "<item><song:coding_f>EAC3</song:coding_f><res>HDMI</res></item>"
+            "</DIDL-Lite>"
+        )
+        assert eventer._parse_didl_metadata(didl_xml)["codec"] == "eac3"
+
+        empty = didl_xml.replace("EAC3", "")
+        assert eventer._parse_didl_metadata(empty, allow_clear=True)["codec"] is None
+        assert "codec" not in eventer._parse_didl_metadata(empty, allow_clear=False)
+
     def test_parse_didl_metadata_empty(self):
         """Test parsing empty DIDL metadata."""
         from pywiim.upnp.eventer import UpnpEventer
