@@ -70,3 +70,32 @@ class TestUpnpMetadataHelpers:
         assert result["PlayMedium"] == "SPOTIFY"
         assert result["title"] == "Herz an Herz"
         assert result["image_url"].startswith("https://i.scdn.co/image/")
+
+    def test_parse_didl_metadata_extracts_input_codec(self):
+        # Fixed-input (HDMI) DIDL uses the www.wiimu.com vendor namespace and
+        # carries the codec in song:coding_f. Matched by local name so the
+        # namespace URI variant does not matter. Normalized to lowercase.
+        didl = (
+            '<DIDL-Lite xmlns:song="www.wiimu.com/song/" '
+            'xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/">'
+            '<item id="0"><song:coding_f>AC3</song:coding_f>'
+            "<res>HDMI</res></item></DIDL-Lite>"
+        )
+        assert parse_didl_metadata(didl)["codec"] == "ac3"
+
+    def test_parse_didl_metadata_codec_absent_and_placeholder(self):
+        # No coding_f element -> no codec key.
+        no_codec = (
+            '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" '
+            'xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/">'
+            "<item><dc:title>x</dc:title></item></DIDL-Lite>"
+        )
+        assert "codec" not in parse_didl_metadata(no_codec)
+
+        # Empty coding_f with allow_clear clears the field.
+        empty = (
+            '<DIDL-Lite xmlns:song="www.wiimu.com/song/" '
+            'xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/">'
+            "<item><song:coding_f></song:coding_f></item></DIDL-Lite>"
+        )
+        assert parse_didl_metadata(empty, allow_clear=True)["codec"] is None

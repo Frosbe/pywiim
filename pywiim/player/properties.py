@@ -564,10 +564,22 @@ class PlayerProperties:
 
     @property
     def media_codec(self) -> str | None:
-        """Audio codec from status (e.g., 'flac', 'mp3', 'aac')."""
+        """Audio codec for the current track or input.
+
+        Prefers the UPnP DIDL codec (LinkPlay ``song:coding_f``), which is the
+        only source that reports the codec for fixed inputs (HDMI/optical/line)
+        - e.g. ``ac3``/``eac3``/``dts`` for surround bitstreams, ``pcm`` for
+        stereo. Falls back to the HTTP status codec for network streams
+        (e.g. ``flac``/``mp3``/``aac``).
+        """
+        merged = self.player._state_synchronizer.get_merged_state()
+        codec: str | None = merged.get("codec")
+        if codec:
+            return codec
         if self.player._status_model is None:
             return None
-        return getattr(self.player._status_model, "codec", None)
+        status_codec: str | None = getattr(self.player._status_model, "codec", None)
+        return status_codec
 
     # === Source-Based Capabilities ===
     # These capabilities depend on the current playback source.

@@ -715,6 +715,17 @@ class UpnpEventer:
                 # Element exists but is empty - clear it only if allowed
                 changes["image_url"] = None
 
+            # Input codec (LinkPlay vendor field song:coding_f); matched by local
+            # name since the vendor namespace URI varies by firmware. Populated
+            # for fixed inputs (HDMI/optical/line), e.g. "AC3"/"EAC3"/"DTS".
+            from .metadata import _find_first_text_by_local_name, normalize_codec
+
+            codec = normalize_codec(_find_first_text_by_local_name(item, "coding_f"))
+            if codec:
+                changes["codec"] = codec
+            elif allow_clear:
+                changes["codec"] = None
+
             if any(v is not None for v in changes.values()):
                 _LOGGER.debug(
                     "Extracted metadata from DIDL-Lite: title=%s, artist=%s, album=%s, image_url=%s",

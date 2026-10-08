@@ -287,6 +287,23 @@ class TestStateSynchronizer:
         # Volume should still be 50 (from UPnP)
         assert merged2["volume"] == 50
 
+    def test_upnp_codec_merges_and_clears_on_source_change(self):
+        """UPnP-only codec (song:coding_f) is merged, then cleared on a source switch.
+
+        Without clearing, an HDMI "ac3" would survive a switch to a network
+        stream and mask that stream's status codec.
+        """
+        sync = StateSynchronizer()
+
+        sync.update_from_upnp(
+            {"play_state": "playing", "source": "hdmi", "codec": "ac3"},
+            force_metadata_update=True,
+        )
+        assert sync.get_merged_state()["codec"] == "ac3"
+
+        sync.update_from_http({"play_state": "play", "source": "spotify"})
+        assert sync.get_merged_state()["codec"] is None
+
 
 class TestGroupStateSynchronizer:
     """Test GroupStateSynchronizer class."""

@@ -27,6 +27,24 @@ def is_valid_image_url(url: str | None) -> bool:
     return parsed.scheme in ("http", "https") and bool(parsed.netloc)
 
 
+_UNKNOWN_CODEC_VALUES = {"", "unknow", "unknown", "un_known", "none"}
+
+
+def normalize_codec(value: str | None) -> str | None:
+    """Normalize a raw codec string (e.g. song:coding_f) to a lowercase token.
+
+    Returns a lowercase codec such as "ac3", "eac3", "dts", "truehd", "pcm",
+    "flac" or None when the value is missing or a placeholder. Kept lowercase to
+    match the existing status-derived codec values (flac/mp3/aac).
+    """
+    if not value or not isinstance(value, str):
+        return None
+    token = value.strip().lower()
+    if token in _UNKNOWN_CODEC_VALUES:
+        return None
+    return token
+
+
 def parse_didl_metadata(didl_xml: str, *, allow_clear: bool = False) -> dict[str, Any]:
     """Parse DIDL-Lite XML and extract track metadata.
 
@@ -96,6 +114,17 @@ def parse_didl_metadata(didl_xml: str, *, allow_clear: bool = False) -> dict[str
                 changes["image_url"] = image_url
             elif allow_clear:
                 changes["image_url"] = None
+
+        # Input codec (LinkPlay vendor field song:coding_f). Populated for
+        # fixed inputs (HDMI/optical/line) where getMetaInfo has no codec, e.g.
+        # "AC3"/"EAC3"/"DTS" for surround bitstreams, "PCM" for stereo. Matched
+        # by local name because the vendor namespace URI varies by firmware
+        # (www.wiimu.com/song/ vs www.linkplay.com/song/).
+        codec = normalize_codec(_find_first_text_by_local_name(item, "coding_f"))
+        if codec:
+            changes["codec"] = codec
+        elif allow_clear:
+            changes["codec"] = None
 
     except ET.ParseError as err:
         _LOGGER.debug("Failed to parse DIDL-Lite metadata: %s", err)

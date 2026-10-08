@@ -41,6 +41,7 @@ FRESHNESS_WINDOWS: dict[str, float] = {
     "image_url": 30.0,
     "source": 60.0,  # Changes rarely
     "duration": 30.0,
+    "codec": 60.0,  # Input codec, changes rarely
 }
 
 # Source priority: which source to prefer when both are available
@@ -62,6 +63,8 @@ SOURCE_PRIORITY: dict[str, list[str]] = {
     "artist": ["upnp", "http"],
     "album": ["upnp", "http"],
     "image_url": ["upnp", "http"],
+    # Input codec: UPnP (song:coding_f) preferred; only UPnP provides it for fixed inputs.
+    "codec": ["upnp", "http"],
     # Source: HTTP preferred (more accurate)
     "source": ["http", "upnp"],
 }
@@ -164,6 +167,7 @@ class SynchronizedState:
     artist: TimestampedField | None = None
     album: TimestampedField | None = None
     image_url: TimestampedField | None = None
+    codec: TimestampedField | None = None
 
     # Volume and mute
     volume: TimestampedField | None = None
@@ -189,6 +193,7 @@ class SynchronizedState:
             "artist",
             "album",
             "image_url",
+            "codec",
             "volume",
             "muted",
             "source",
@@ -456,6 +461,7 @@ class StateSynchronizer:
             "artist",
             "album",
             "image_url",
+            "codec",
             "source",
         ]:
             http_field = self._http_state.get(field_name)
@@ -890,7 +896,7 @@ class StateSynchronizer:
         apply_metadata = force_metadata_update or source_changed or not self._should_clear_metadata()
         if not apply_metadata:
             return
-        for field_name in ("title", "artist", "album", "image_url"):
+        for field_name in ("title", "artist", "album", "image_url", "codec"):
             if field_name not in data:
                 continue
             value = data.get(field_name)
@@ -937,13 +943,17 @@ class StateSynchronizer:
             self._stale_metadata_after_source = None
 
     def _clear_track_metadata(self) -> None:
-        """Drop title/artist/album/art/duration after a source change.
+        """Drop title/artist/album/art/duration/codec after a source change.
 
         Firmware often keeps the previous source's metadata in getPlayerStatusEx
         (Spotify → network stream). Clearing here prevents a permanently stale track.
+        Codec is cleared too: it is UPnP-only, so without this an HDMI "ac3" would
+        survive a switch to a network stream and mask the stream's status codec.
+        It is intentionally NOT added to the stale-metadata snapshot, because that
+        guard only releases on a new title and fixed inputs have no title.
         """
         now = time.time()
-        for field_name in ("title", "artist", "album", "image_url", "duration"):
+        for field_name in ("title", "artist", "album", "image_url", "duration", "codec"):
             self._http_state.pop(field_name, None)
             self._upnp_state.pop(field_name, None)
             # Keep a resolved-to-None field so Player._status_field does not
