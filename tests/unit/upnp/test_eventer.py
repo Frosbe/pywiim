@@ -675,3 +675,23 @@ class TestPlaybackStorageMedium:
         )
         call_args = state_manager.apply_diff.call_args[0][0]
         assert call_args["source"] == "optical"
+
+    def test_empty_last_change_expansion_is_not_a_resubscription_failure(self):
+        """An empty event right after a LastChange is a routine expansion, not a failure."""
+        from datetime import datetime, timedelta, timezone
+
+        from pywiim.upnp.eventer import UpnpEventer
+
+        eventer = UpnpEventer(MagicMock(), MagicMock(), "test-uuid")
+        service = MagicMock()
+        service.service_id = "urn:upnp-org:serviceId:AVTransport"
+        service.has_state_variable.return_value = True
+        service.state_variable.return_value.updated_at = datetime.now(timezone.utc)
+
+        eventer._on_event(service, [])
+        assert eventer.check_available is False
+
+        # LastChange not fresh: treated as a failed resubscription.
+        service.state_variable.return_value.updated_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+        eventer._on_event(service, [])
+        assert eventer.check_available is True

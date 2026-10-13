@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable, Sequence
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
@@ -205,6 +206,23 @@ class UpnpEventer:
 
         _LOGGER.info("UPnP event subscriptions stopped for %s", self.upnp_client.host)
 
+    @staticmethod
+    def _is_last_change_expansion(service: Any, max_age: float = 2.0) -> bool:
+        """Return True when an empty event is the expansion of a LastChange that just arrived.
+
+        After a failed resubscription DmrDevice also calls on_event with an empty list,
+        but then the service's LastChange value is not fresh.
+        """
+        try:
+            if not service.has_state_variable("LastChange"):
+                return False
+            updated_at = service.state_variable("LastChange").updated_at
+        except Exception:  # noqa: BLE001
+            return False
+        if updated_at is None:
+            return False
+        return (datetime.now(timezone.utc) - updated_at).total_seconds() < max_age
+
     def _on_event(
         self,
         service: UpnpService,
@@ -264,6 +282,18 @@ class UpnpEventer:
             is_connection_manager = "ConnectionManager" in service_id
             is_early_lifecycle = event_count < 5 and (time_since_last_event is None or time_since_last_event < 5.0)
             is_expected_empty = is_connection_manager and is_early_lifecycle
+
+            if not is_expected_empty and self._is_last_change_expansion(service):
+                # DmrDevice expands LastChange via notify_changed_state_variables, which
+                # only passes variables declared in the SCPD. When a device's LastChange
+                # holds only undeclared variables the expansion is empty. That happens on
+                # ordinary events and is not a resubscription failure.
+                _LOGGER.debug(
+                    "UPnP %s event for %s carried no declared state variables, ignoring",
+                    service_id,
+                    self.upnp_client.host,
+                )
+                return
 
             if is_expected_empty:
                 # Normal behavior - log at DEBUG level
