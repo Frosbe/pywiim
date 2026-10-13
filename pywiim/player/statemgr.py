@@ -34,6 +34,13 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
+# Wired inputs whose codec is only reported over UPnP (song:coding_f), never in the
+# HTTP status. The device sends an AVTransport LastChange event carrying the new
+# coding_f when the bitstream codec changes, so GetInfoEx is only needed to seed the
+# value, or as a periodic fallback while UPnP events are not healthy.
+_CODEC_PROBE_SOURCES = frozenset({"hdmi", "optical", "coaxial", "line_in", "line_in_2", "aux", "phono", "rca"})
+_CODEC_PROBE_INTERVAL = 10.0
+
 _PlayerPlayState = Literal["play", "pause", "stop", "idle", "buffering"]
 _PLAYER_PLAY_STATES: frozenset[str] = frozenset({"play", "pause", "stop", "idle", "buffering"})
 
@@ -102,6 +109,9 @@ class StateManager:
 
         # Track last source to detect source changes (for audio output fetching)
         self._last_source: str | None = None
+
+        # Last GetInfoEx input-codec probe (wired inputs only)
+        self._last_input_codec_check: float | None = None
 
         # Polling strategy for periodic fetching decisions
         self._polling_strategy: PollingStrategy | None = None
@@ -891,6 +901,52 @@ class StateManager:
             except Exception as err:
                 _LOGGER.debug("Failed to fetch EQ info after preset change for %s: %s", self.player.host, err)
 
+    def _should_probe_input_codec(
+        self,
+        full: bool,
+        status: PlayerStatus | None,
+        source_changed: bool,
+        is_playing: bool,
+        now: float,
+    ) -> bool:
+        """Return True when the wired-input codec should be probed via GetInfoEx."""
+        if self.player.is_slave or not is_playing or status is None:
+            return False
+        source = str(status.source or "").lower()
+        if source not in _CODEC_PROBE_SOURCES:
+            return False
+        if getattr(self.player, "_getinfoex_supported", None) is False:
+            return False
+        last = self._last_input_codec_check
+        if full or source_changed or last is None:
+            return True  # seed the codec
+        if self.player.upnp_is_healthy is True:
+            return False  # codec changes arrive as UPnP events
+        return (now - last) >= _CODEC_PROBE_INTERVAL
+
+    async def _probe_input_codec(self, now: float) -> None:
+        """Fetch the input codec from GetInfoEx and merge it as a UPnP field.
+
+        A missing coding_f is applied as None so a codec from an earlier
+        bitstream does not linger.
+        """
+        self._last_input_codec_check = now
+        if not await self.player._ensure_upnp_client():
+            return
+        upnp_client = self.player._upnp_client
+        if upnp_client is None or upnp_client.av_transport is None:
+            return
+        try:
+            info = await upnp_client.get_info_ex()
+        except Exception as err:
+            _LOGGER.debug("GetInfoEx codec probe failed for %s: %s", self.player.host, err)
+            return
+        self.player._state_synchronizer.update_from_upnp(
+            {"codec": info.get("codec")},
+            timestamp=now,
+            force_metadata_update=True,
+        )
+
     async def _refresh_periodic_data(self, full: bool, status: PlayerStatus, track_changed: bool) -> None:
         """Refresh periodic data (audio output, EQ presets, presets, BT history).
 
@@ -936,6 +992,11 @@ class StateManager:
                 self.player._metadata = None
             finally:
                 self.player._last_metadata_check = now
+
+        # Input codec (song:coding_f) - only available from UPnP GetInfoEx, and only
+        # meaningful on wired inputs (e.g. "ac3" for a Dolby Digital bitstream on HDMI).
+        if self._should_probe_input_codec(full, status, source_changed, is_playing, now):
+            await self._probe_input_codec(now)
 
         # Audio Output Status - Fetch on first refresh, full refresh, source change, or periodically (every 60s)
         # CRITICAL: Fetch on startup (when None) so audio_output_mode property works immediately

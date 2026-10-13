@@ -675,3 +675,27 @@ class TestPlaybackStorageMedium:
         )
         call_args = state_manager.apply_diff.call_args[0][0]
         assert call_args["source"] == "optical"
+
+    def test_parse_last_change_extracts_input_codec(self):
+        """A real AVTransport LastChange event carries song:coding_f inside CurrentTrackMetaData.
+
+        Captured behaviour (WiiM Amp Pro, HDMI): the device sends this event when the
+        incoming bitstream codec changes, e.g. LPCM -> AC3 and AC3 -> LPCM.
+        """
+        from pywiim.upnp.eventer import UpnpEventer
+
+        eventer = UpnpEventer(MagicMock(), MagicMock(), "test-uuid")
+        didl = (
+            '<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" '
+            'xmlns:song="www.wiimu.com/song/"><item id="0">'
+            "<song:coding_f>AC3</song:coding_f><res>HDMI</res></item></DIDL-Lite>"
+        )
+        escaped = didl.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+        last_change = (
+            '<Event xmlns="urn:schemas-upnp-org:metadata-1-0/AVT/"><InstanceID val="0">'
+            f'<CurrentTrackMetaData val="{escaped}"/></InstanceID></Event>'
+        )
+
+        changes = eventer._parse_last_change("AVTransport", last_change)
+
+        assert changes["codec"] == "ac3"

@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Input codec missing on wired inputs when UPnP events do not arrive**: 2.3.10 parses `song:coding_f`, but on wired inputs the codec only reaches pywiim through UPnP: an AVTransport `LastChange` event carrying the new `coding_f` (the WiiM Amp Pro sends one on every codec change, e.g. LPCM to AC3 and back), or `GetInfoEx`. Nothing fetched `GetInfoEx` for it, and the artwork enrichment that calls `GetInfoEx` did not run on HDMI and dropped the codec. So when event delivery fails (callback blocked between VLANs, events marked degraded), `media_codec` stayed `None`. `StateManager` now fetches the codec from `GetInfoEx` when playing on a wired input on startup, full refresh and input change, and also every 10s while UPnP events are not healthy. With healthy events it relies on the events. The artwork enrichment passes the codec through. Stereo on HDMI reports `lpcm`; an Atmos track the TV cannot pass through is decoded and also reports `lpcm`.
+
 ## [2.3.10] - 2026-10-13
 
 ### Added

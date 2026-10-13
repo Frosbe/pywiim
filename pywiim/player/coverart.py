@@ -350,6 +350,10 @@ class CoverArtManager:
                     update[field] = source_value
                     update[alias] = source_value
 
+        # Input codec from GetInfoEx (song:coding_f); getMetaInfo has none.
+        if source.get("codec"):
+            update["codec"] = source["codec"]
+
         artwork_url = (
             source.get("image_url")
             or source.get("cover")

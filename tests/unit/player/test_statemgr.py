@@ -1079,3 +1079,94 @@ class TestStateManager:
         calls = mock_player._state_synchronizer.update_from_http.call_args_list
         play_states = [c[0][0].get("play_state") for c in calls if "play_state" in c[0][0]]
         assert play_states == ["pause"]
+
+    @staticmethod
+    def _setup_codec_probe(mock_player, codec="ac3"):
+        """Mock a reachable UPnP client whose GetInfoEx reports the given codec."""
+        mock_player._ensure_upnp_client = AsyncMock(return_value=True)
+        mock_player._upnp_client = MagicMock()
+        mock_player._upnp_client.av_transport = MagicMock()
+        mock_player._upnp_client.get_info_ex = AsyncMock(return_value={"codec": codec} if codec else {})
+        mock_player.client.get_meta_info = AsyncMock(return_value={"metaData": {}})
+
+    @staticmethod
+    def _codec_updates(mock_player):
+        return [
+            c.args[0]
+            for c in mock_player._state_synchronizer.update_from_upnp.call_args_list
+            if c.args and "codec" in c.args[0]
+        ]
+
+    @pytest.mark.asyncio
+    async def test_input_codec_probed_on_wired_input_while_playing(self, state_manager, mock_player):
+        """HDMI codec is only in GetInfoEx; it is probed and merged as a UPnP field."""
+        self._setup_refresh_mocks(mock_player, state_manager)
+        self._setup_codec_probe(mock_player, "ac3")
+
+        status = PlayerStatus(source="hdmi", play_state="play")
+        await state_manager._refresh_periodic_data(full=False, status=status, track_changed=False)
+
+        mock_player._upnp_client.get_info_ex.assert_awaited_once()
+        assert self._codec_updates(mock_player) == [{"codec": "ac3"}]
+
+    @pytest.mark.asyncio
+    async def test_input_codec_cleared_when_getinfoex_has_none(self, state_manager, mock_player):
+        """A missing coding_f is merged as None so an earlier codec does not linger."""
+        self._setup_refresh_mocks(mock_player, state_manager)
+        self._setup_codec_probe(mock_player, None)
+
+        status = PlayerStatus(source="optical", play_state="play")
+        await state_manager._refresh_periodic_data(full=False, status=status, track_changed=False)
+
+        assert self._codec_updates(mock_player) == [{"codec": None}]
+
+    @pytest.mark.asyncio
+    async def test_input_codec_not_probed_for_streaming_or_idle(self, state_manager, mock_player):
+        """Streams carry their codec in the HTTP status; idle inputs are not probed."""
+        self._setup_refresh_mocks(mock_player, state_manager)
+        self._setup_codec_probe(mock_player)
+
+        await state_manager._refresh_periodic_data(
+            full=False, status=PlayerStatus(source="spotify", play_state="play"), track_changed=False
+        )
+        await state_manager._refresh_periodic_data(
+            full=False, status=PlayerStatus(source="hdmi", play_state="pause"), track_changed=False
+        )
+
+        mock_player._upnp_client.get_info_ex.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_input_codec_probe_respects_interval(self, state_manager, mock_player):
+        """Probe at most once per interval while the input stays the same."""
+        from pywiim.player import statemgr
+
+        self._setup_refresh_mocks(mock_player, state_manager)
+        self._setup_codec_probe(mock_player)
+        status = PlayerStatus(source="hdmi", play_state="play")
+
+        await state_manager._refresh_periodic_data(full=False, status=status, track_changed=False)
+        await state_manager._refresh_periodic_data(full=False, status=status, track_changed=False)
+        assert mock_player._upnp_client.get_info_ex.await_count == 1
+
+        state_manager._last_input_codec_check -= statemgr._CODEC_PROBE_INTERVAL
+        await state_manager._refresh_periodic_data(full=False, status=status, track_changed=False)
+        assert mock_player._upnp_client.get_info_ex.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_input_codec_not_polled_when_upnp_events_healthy(self, state_manager, mock_player):
+        """With healthy UPnP the codec is seeded once; changes then arrive as events."""
+        self._setup_refresh_mocks(mock_player, state_manager)
+        self._setup_codec_probe(mock_player)
+        mock_player._upnp_health_tracker = MagicMock(is_healthy=True)
+        hdmi = PlayerStatus(source="hdmi", play_state="play")
+
+        await state_manager._refresh_periodic_data(full=False, status=hdmi, track_changed=False)
+        state_manager._last_input_codec_check -= 3600  # long past the poll interval
+        await state_manager._refresh_periodic_data(full=False, status=hdmi, track_changed=False)
+        assert mock_player._upnp_client.get_info_ex.await_count == 1
+
+        # Switching input re-seeds the codec.
+        state_manager._last_source = "hdmi"
+        optical = PlayerStatus(source="optical", play_state="play")
+        await state_manager._refresh_periodic_data(full=False, status=optical, track_changed=False)
+        assert mock_player._upnp_client.get_info_ex.await_count == 2

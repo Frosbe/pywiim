@@ -546,3 +546,11 @@ class TestCoverArtManager:
         await cover_art_manager.enrich_metadata_on_track_change(merged)
 
         cover_art_manager._fetch_artwork_from_metainfo.assert_awaited_once_with(merged, force_getinfoex=False)
+
+    def test_build_metadata_update_carries_getinfoex_codec(self, cover_art_manager):
+        """GetInfoEx enrichment passes the song:coding_f codec through to the update."""
+        update = cover_art_manager._build_metadata_update({}, {"codec": "ac3"}, source_name="GetInfoEx")
+        assert update["codec"] == "ac3"
+
+        update = cover_art_manager._build_metadata_update({}, {"title": "x"}, source_name="getMetaInfo")
+        assert "codec" not in update
