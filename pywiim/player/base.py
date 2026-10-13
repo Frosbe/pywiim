@@ -141,6 +141,9 @@ class PlayerBase:
 
             self._upnp_health_tracker = UpnpHealthTracker()
 
+        # UPnP event subscription (opt-in via async_start_upnp_events)
+        self._upnp_eventer: Any = None
+
         # Track last UPnP creation attempt (for retry with cooldown)
         # 0 = never attempted, >0 = timestamp of last attempt
         self._last_upnp_attempt: float = 0
@@ -433,6 +436,81 @@ class PlayerBase:
                 err,
             )
             return False
+
+    @property
+    def upnp_events_active(self) -> bool:
+        """Whether this player is subscribed to UPnP events."""
+        return self._upnp_eventer is not None
+
+    async def async_start_upnp_events(
+        self,
+        callback_host: str | None = None,
+        callback_port: int = 0,
+    ) -> bool:
+        """Subscribe to UPnP AVTransport/RenderingControl events.
+
+        Events are merged through :meth:`apply_diff` and fire ``on_state_changed``,
+        so changes the device announces (play state, volume, track metadata,
+        input codec) arrive without waiting for the next poll. HTTP polling keeps
+        running alongside. Renewals are handled by ``auto_resubscribe``.
+
+        Args:
+            callback_host: IP the device should send NOTIFY requests to. Auto-detected
+                from the route to the device when None.
+            callback_port: Port for the NOTIFY server (0 = ephemeral).
+
+        Returns:
+            True when subscribed (or already subscribed), False when the UPnP client
+            is unavailable or the subscription failed. Failures are logged and leave
+            the player on HTTP polling.
+        """
+        if self._upnp_eventer is not None:
+            return True
+        if not await self._ensure_upnp_client() or self._upnp_client is None:
+            return False
+
+        from ..upnp.eventer import UpnpEventer
+
+        eventer = UpnpEventer(
+            self._upnp_client,
+            self,
+            self.uuid or self.client.host,
+            state_updated_callback=self._on_upnp_event,
+        )
+        try:
+            await eventer.start(callback_host=callback_host, callback_port=callback_port)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("UPnP event subscription failed for %s: %s", self.client.host, err)
+            try:
+                await self._upnp_client.unwind_notify_server()
+            except Exception as unwind_err:  # noqa: BLE001
+                _LOGGER.debug("Error stopping notify server for %s: %s", self.client.host, unwind_err)
+            return False
+
+        self._upnp_eventer = eventer
+        if self._upnp_health_tracker is not None:
+            # Misses counted before the subscription existed are meaningless.
+            self._upnp_health_tracker.reset_statistics()
+        return True
+
+    async def async_stop_upnp_events(self) -> None:
+        """Unsubscribe from UPnP events and stop the NOTIFY server."""
+        eventer = self._upnp_eventer
+        if eventer is None:
+            return
+        self._upnp_eventer = None
+        try:
+            await eventer.async_unsubscribe()
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Error unsubscribing UPnP events for %s: %s", self.client.host, err)
+
+    def _on_upnp_event(self) -> None:
+        """Notify the owner after a UPnP event was merged into state."""
+        if self._on_state_changed is not None:
+            try:
+                self._on_state_changed()
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Error in on_state_changed after UPnP event for %s: %s", self.client.host, err)
 
     def __repr__(self) -> str:
         """String representation."""
