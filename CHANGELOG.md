@@ -7,8 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.10] - 2026-10-13
+
 ### Added
-- **Input codec detection for fixed inputs**: `parse_didl_metadata` now extracts the LinkPlay vendor `song:coding_f` field (matched by local name, so it works across the `www.wiimu.com/song/` and `www.linkplay.com/song/` namespace variants) and exposes it through the merged state as `codec`. `Player.media_codec` prefers this UPnP-derived codec, which is the only source that reports the codec for HDMI/optical/line inputs (for example `ac3` for a Dolby Digital bitstream; the exact values depend on firmware), and falls back to the HTTP status codec (`flac`/`mp3`/`aac`) for network streams. The codec is cleared on a source change so an HDMI codec cannot persist into a network stream. Enables surround/Dolby detection on WiiM home-theater setups.
+- **Input codec detection for fixed inputs**: `parse_didl_metadata` now extracts the LinkPlay vendor `song:coding_f` field (matched by local name, so it works across the `www.wiimu.com/song/` and `www.linkplay.com/song/` namespace variants) and exposes it through the merged state as `codec`. `Player.media_codec` uses this when HTTP status has no codec, which is the case for HDMI, optical, and line inputs (for example `ac3` for a Dolby Digital bitstream; the exact values depend on firmware), and keeps the HTTP status codec (`flac`/`mp3`/`aac`) for network streams when that value is present. The codec is cleared on a source change. An empty `coding_f` while the same input keeps playing does not clear the previous value. `ac3` is the only value confirmed from a device.
 
 ## [2.3.9] - 2026-09-27
 
